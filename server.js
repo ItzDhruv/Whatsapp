@@ -57,7 +57,7 @@ const upload = multer({
 });
 
 // MongoDB connection
-mongoose.connect('mongodb://localhost:27017/chatapp', {
+mongoose.connect('mongodb+srv://dhruvdobariya897_db_user:dhvWmGaEYFZvIDaj@cluster0.u0gskue.mongodb.net/', {
   useNewUrlParser: true,
   useUnifiedTopology: true
 })
