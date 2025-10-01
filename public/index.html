@@ -1,0 +1,426 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Mini-WhatsApp — Test Client</title>
+  <style>
+    /* Simple WhatsApp-like layout (mobile-friendly) */
+    :root {
+      --accent: #25D366;
+      --bg: #e5ddd5;
+      --chat-bg: #ffffff;
+      --muted: #999;
+      --max-width: 1100px;
+    }
+    * { box-sizing: border-box; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial; }
+    body { margin: 0; background: var(--bg); display: flex; justify-content: center; padding: 12px; }
+    .app { width: 100%; max-width: var(--max-width); display: grid; grid-template-columns: 320px 1fr; gap: 12px; }
+
+    /* Left panel */
+    .sidebar { background: #f6f6f6; border-radius: 8px; padding: 12px; height: 85vh; display: flex; flex-direction: column; }
+    .me-box { display:flex; gap:8px; align-items:center; margin-bottom:12px; }
+    .me-box input[type="text"] { flex:1; padding:8px; border-radius:6px; border:1px solid #ddd; }
+    .btn { background: var(--accent); color:white; border:none; padding:8px 10px; border-radius:6px; cursor:pointer; }
+    .btn.secondary { background: #eee; color:#333; border:1px solid #ddd; }
+
+    .lists { overflow:auto; flex:1; margin-top:8px; }
+    .section-title { font-size:12px; color:var(--muted); margin:8px 0; }
+    .user-item { display:flex; justify-content:space-between; padding:8px; border-radius:6px; cursor:pointer; align-items:center; }
+    .user-item:hover { background: #fff; }
+    .user-name { font-weight:600; }
+    .status-dot { width:10px;height:10px;border-radius:50%;background:#bbb;margin-right:8px; }
+    .online { background:#2ecc71 !important; }
+
+    /* Chat area */
+    .chat { background: var(--chat-bg); border-radius:8px; height:85vh; display:flex; flex-direction:column; overflow:hidden; }
+    .chat-header { padding:12px; border-bottom:1px solid #eee; display:flex; align-items:center; gap:12px; }
+    .chat-body { flex:1; padding:12px; overflow:auto; background-image: linear-gradient(0deg, rgba(0,0,0,0.01) 1px, transparent 1px); background-size: 40px 40px; }
+    .message { max-width:70%; margin:6px 0; padding:8px 10px; border-radius:10px; line-height:1.3; }
+    .from-me { margin-left:auto; background:#dcf8c6; }
+    .from-them { margin-right:auto; background:#fff; box-shadow:0 0 0 1px #eee; }
+    .meta { font-size:11px; color:var(--muted); margin-top:4px; text-align:right; }
+    .typing { font-size:13px; color:var(--muted); padding:6px; }
+
+    /* composer */
+    .composer { display:flex; gap:8px; padding:10px; border-top:1px solid #eee; align-items:center; }
+    .composer input[type="text"] { flex:1; padding:10px; border-radius:999px; border:1px solid #ddd; }
+    .composer input[type="file"] { display:none; }
+    .upload-label { padding:8px; border-radius:8px; background:#f3f3f3; border:1px dashed #ddd; cursor:pointer; }
+
+    /* small screens */
+    @media (max-width:700px) {
+      .app { grid-template-columns: 1fr; }
+      .sidebar { order:2; height:auto; max-height:220px; }
+      .chat { order:1; height:70vh; }
+    }
+  </style>
+</head>
+<body>
+  <div class="app">
+    <!-- LEFT: Users/Groups -->
+    <div class="sidebar">
+      <div class="me-box">
+        <input id="usernameInput" type="text" placeholder="Enter your username (min 3)" />
+        <button id="btnRegister" class="btn">Connect</button>
+      </div>
+
+      <div style="display:flex; gap:8px; margin-bottom:8px;">
+        <button id="refreshBtn" class="btn secondary">Refresh</button>
+        <button id="myProfile" class="btn secondary">My Profile</button>
+      </div>
+
+      <div class="section-title">Users</div>
+      <div id="usersList" class="lists"></div>
+
+      <div class="section-title" style="margin-top:8px;">Groups</div>
+      <div id="groupsList" class="lists" style="max-height:160px; overflow:auto;"></div>
+
+      <div style="margin-top:8px; font-size:12px; color:var(--muted)">
+        <div>Server: <span id="serverUrl">http://localhost:3000</span></div>
+        <div style="margin-top:6px;">Tip: open multiple browser windows to simulate multiple users.</div>
+      </div>
+    </div>
+
+    <!-- RIGHT: Chat -->
+    <div class="chat">
+      <div class="chat-header">
+        <div id="chatTitle" style="font-weight:700">Select a user or group</div>
+        <div id="chatSub" style="color:var(--muted); font-size:13px;"></div>
+      </div>
+
+      <div id="chatBody" class="chat-body"></div>
+
+      <div id="typingIndicator" class="typing" style="display:none;"></div>
+
+      <div class="composer">
+        <label class="upload-label" title="Upload image">
+          <input id="fileInput" type="file" accept="image/*" />
+          📎
+        </label>
+        <input id="messageInput" type="text" placeholder="Type a message" />
+        <button id="sendBtn" class="btn">Send</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Socket.IO client will be served by your server at /socket.io/socket.io.js -->
+  <script src="/socket.io/socket.io.js"></script>
+  <script>
+    /* --------------- Config & State --------------- */
+    const API_BASE = window.location.origin; // assumes same origin (http://localhost:3000)
+    const socket = io("http://localhost:3000"); // connects to same origin
+
+    let me = null; // { username, _id, online }
+    let currentChat = null; // { type: 'private'|'group', id: username or groupId, name }
+    const users = new Map(); // username -> user object
+    const groups = new Map(); // id -> group object
+
+    /* --------------- UI Refs --------------- */
+    const usernameInput = document.getElementById('usernameInput');
+    const btnRegister = document.getElementById('btnRegister');
+    const usersList = document.getElementById('usersList');
+    const groupsList = document.getElementById('groupsList');
+    const chatBody = document.getElementById('chatBody');
+    const chatTitle = document.getElementById('chatTitle');
+    const chatSub = document.getElementById('chatSub');
+    const messageInput = document.getElementById('messageInput');
+    const sendBtn = document.getElementById('sendBtn');
+    const refreshBtn = document.getElementById('refreshBtn');
+    const fileInput = document.getElementById('fileInput');
+    const typingIndicator = document.getElementById('typingIndicator');
+
+    /* --------------- Helpers --------------- */
+    function el(tag, cls = '') { const e = document.createElement(tag); if (cls) e.className = cls; return e; }
+    function isoTimeShort(d) { try { return new Date(d).toLocaleTimeString(); } catch (e) { return ''; } }
+
+    function renderUsers() {
+      usersList.innerHTML = '';
+      const sorted = Array.from(users.values()).sort((a,b) => a.username.localeCompare(b.username));
+      for (const u of sorted) {
+        // skip self
+        if (me && u.username === me.username) continue;
+        const item = el('div','user-item');
+        item.dataset.username = u.username;
+        const left = el('div');
+        left.style.display = 'flex'; left.style.alignItems = 'center';
+        const dot = el('span','status-dot');
+        if (u.online) dot.classList.add('online');
+        left.appendChild(dot);
+        const name = el('span','user-name'); name.textContent = u.username;
+        left.appendChild(name);
+        item.appendChild(left);
+
+        const right = el('div'); right.style.fontSize = '12px'; right.style.color = '#666';
+        right.textContent = u.online ? 'Online' : `Last: ${u.lastSeen ? new Date(u.lastSeen).toLocaleString() : '-'}`;
+        item.appendChild(right);
+
+        item.addEventListener('click', () => openPrivateChat(u.username));
+        usersList.appendChild(item);
+      }
+    }
+
+    function renderGroups() {
+      groupsList.innerHTML = '';
+      for (const g of groups.values()) {
+        const item = el('div','user-item');
+        item.dataset.groupId = g._id;
+        const left = el('div'); left.style.display='flex'; left.style.alignItems='center';
+        const dot = el('span','status-dot'); dot.style.background='#888';
+        left.appendChild(dot);
+        const name = el('span','user-name'); name.textContent = g.name;
+        left.appendChild(name);
+        item.appendChild(left);
+        const right = el('div'); right.style.fontSize='12px'; right.style.color='#666';
+        right.textContent = `${g.members.length} members`;
+        item.appendChild(right);
+        item.addEventListener('click', () => openGroupChat(g._id));
+        groupsList.appendChild(item);
+      }
+    }
+
+    function appendMessage(message, fromMe=false) {
+      const box = el('div', 'message ' + (fromMe ? 'from-me' : 'from-them'));
+      box.innerHTML = `<div style="white-space:pre-wrap">${message.content || ''}</div>`;
+      if (message.photo) {
+        const img = el('img'); img.src = message.photo.startsWith('/') ? message.photo : message.photo;
+        img.style.maxWidth = '220px'; img.style.display='block'; img.style.marginTop='6px'; img.style.borderRadius='8px';
+        box.appendChild(img);
+      }
+      const meta = el('div','meta'); meta.textContent = `${message.sender || ''} • ${isoTimeShort(message.timestamp)}`;
+      box.appendChild(meta);
+      chatBody.appendChild(box);
+      chatBody.scrollTop = chatBody.scrollHeight;
+    }
+
+    /* --------------- API calls --------------- */
+    async function api(path, opts = {}) {
+      const res = await fetch(API_BASE + path, opts);
+      if (!res.ok) {
+        const txt = await res.text();
+        throw new Error(`API error ${res.status}: ${txt}`);
+      }
+      return res.json();
+    }
+
+    async function loadUsers() {
+      try {
+        const res = await api('/api/users');
+        if (res.success) {
+          users.clear();
+          res.users.forEach(u => users.set(u.username, u));
+          renderUsers();
+        }
+      } catch (err) { console.error('loadUsers', err); }
+    }
+
+    async function loadGroups() {
+      try {
+        const res = await api('/api/groups');
+        if (res.success) {
+          groups.clear();
+          res.groups.forEach(g => groups.set(g._id, g));
+          renderGroups();
+        }
+      } catch (err) { console.error('loadGroups', err); }
+    }
+
+    async function fetchPrivateHistory(withUsername) {
+      try {
+        const url = `/api/messages/private/${encodeURIComponent(withUsername)}?username=${encodeURIComponent(me.username)}&limit=100`;
+        const res = await api(url);
+        if (res.success) {
+          chatBody.innerHTML = '';
+          res.messages.forEach(m => appendMessage(m, m.sender === me.username));
+        }
+      } catch (err) { console.error('fetchPrivateHistory', err); }
+    }
+
+    async function fetchGroupHistory(groupId) {
+      try {
+        const url = `/api/messages/group/${encodeURIComponent(groupId)}?limit=100`;
+        const res = await api(url);
+        if (res.success) {
+          chatBody.innerHTML = '';
+          res.messages.forEach(m => appendMessage(m, m.sender === me.username));
+        }
+      } catch (err) { console.error('fetchGroupHistory', err); }
+    }
+
+    /* --------------- Chat open handlers --------------- */
+    function openPrivateChat(username) {
+      currentChat = { type: 'private', id: username, name: username };
+      chatTitle.textContent = username;
+      chatSub.textContent = 'Private chat';
+      fetchPrivateHistory(username);
+    }
+
+    function openGroupChat(groupId) {
+      const g = groups.get(groupId);
+      if (!g) return alert('Group not found locally. Refresh groups.');
+      currentChat = { type: 'group', id: groupId, name: g.name };
+      chatTitle.textContent = g.name;
+      chatSub.textContent = `Group • ${g.members.length} members`;
+      fetchGroupHistory(groupId);
+      // auto-join group socket room
+      socket.emit('join_group', groupId);
+    }
+
+    /* --------------- Register / Socket events --------------- */
+    btnRegister.addEventListener('click', async () => {
+      const username = usernameInput.value.trim();
+      if (!username || username.length < 3) return alert('Enter username (min 3 chars)');
+      try {
+        // Call register API to create user via REST
+        const res = await api('/api/auth/register', {
+          method: 'POST',
+          headers: {'Content-Type':'application/json'},
+          body: JSON.stringify({ username })
+        });
+        if (!res.success) throw new Error(res.error || 'Register failed');
+
+        me = res.user;
+        usernameInput.disabled = true;
+        btnRegister.disabled = true;
+        btnRegister.textContent = 'Connected';
+        // notify socket
+        socket.emit('register', me.username);
+
+        // load lists
+        await loadUsers();
+        await loadGroups();
+        // select first user if exists
+        // no auto select: wait user click
+
+      } catch (err) {
+        alert('Register error: ' + err.message);
+        console.error(err);
+      }
+    });
+
+    refreshBtn.addEventListener('click', () => { loadUsers(); loadGroups(); });
+
+    /* --------------- Sending messages & uploading --------------- */
+    sendBtn.addEventListener('click', sendMessage);
+    messageInput.addEventListener('keydown', (e) => {
+      if (!me) return;
+      if (e.key === 'Enter') sendMessage();
+      else {
+        // send typing event
+        if (currentChat && currentChat.type === 'private') {
+          socket.emit('typing', { receiver: currentChat.id });
+          // stop typing after 1.5s of inactivity
+          clearTimeout(window._typingTO);
+          window._typingTO = setTimeout(() => socket.emit('stop_typing', { receiver: currentChat.id }), 1500);
+        }
+      }
+    });
+
+    async function sendMessage() {
+      if (!me) return alert('Please connect first');
+      if (!currentChat) return alert('Select a user or group to chat');
+      const text = messageInput.value.trim();
+      let photo = null;
+
+      // If file was selected, upload it first
+      if (fileInput.files && fileInput.files[0]) {
+        try {
+          const form = new FormData();
+          form.append('photo', fileInput.files[0]);
+          const res = await fetch('/api/upload', { method: 'POST', body: form });
+          const json = await res.json();
+          if (!json.success) throw new Error(json.error || 'Upload failed');
+          photo = json.url; // e.g. /uploads/xxxx
+          fileInput.value = ''; // clear file after upload
+        } catch (err) {
+          alert('Upload failed: ' + err.message);
+          console.error(err);
+          return;
+        }
+      }
+
+      if (!text && !photo) return;
+
+      if (currentChat.type === 'private') {
+        // emit to server
+        socket.emit('private_message', { receiver: currentChat.id, content: text, photo });
+        // optimistically append
+        appendMessage({ sender: me.username, content: text, photo, timestamp: new Date().toISOString() }, true);
+      } else if (currentChat.type === 'group') {
+        socket.emit('group_message', { groupId: currentChat.id, content: text, photo });
+        appendMessage({ sender: me.username, content: text, photo, timestamp: new Date().toISOString() }, true);
+      }
+      messageInput.value = '';
+    }
+
+    // file input change preview (optional)
+    fileInput.addEventListener('change', () => {
+      if (fileInput.files && fileInput.files[0]) {
+        // small visual feedback
+        sendBtn.textContent = 'Send (with file)';
+      } else sendBtn.textContent = 'Send';
+    });
+
+    /* --------------- Socket listeners --------------- */
+    socket.on('connect', () => console.log('socket connected', socket.id));
+    socket.on('disconnect', () => console.log('socket disconnected'));
+
+    socket.on('user_status', (data) => {
+      // data: { username, online, timestamp }
+      const u = users.get(data.username) || { username: data.username };
+      u.online = !!data.online;
+      u.lastSeen = data.lastSeen || data.timestamp || new Date().toISOString();
+      users.set(data.username, u);
+      renderUsers();
+    });
+
+    socket.on('private_message', (msg) => {
+      // msg contains sender, receiver, content, photo, timestamp
+      // if current chat is with sender, append; otherwise show a small notification
+      if (currentChat && currentChat.type === 'private' && currentChat.id === msg.sender) {
+        appendMessage(msg, msg.sender === me.username);
+      } else {
+        // show in users list with a visual indicator
+        // (simple alert for now)
+        console.log('New private message', msg);
+        // optionally highlight user
+      }
+    });
+
+    socket.on('message_sent', (res) => {
+      // confirmation for sent message
+      console.log('message_sent', res);
+    });
+
+    socket.on('group_message', (msg) => {
+      if (currentChat && currentChat.type === 'group' && currentChat.id === msg.groupId) {
+        appendMessage(msg, msg.sender === me.username);
+      } else {
+        console.log('Group message for other group', msg);
+      }
+    });
+
+    socket.on('user_typing', (data) => {
+      if (currentChat && currentChat.type === 'private' && currentChat.id === data.username) {
+        typingIndicator.style.display = 'block';
+        typingIndicator.textContent = `${data.username} is typing...`;
+      }
+    });
+    socket.on('user_stop_typing', (data) => {
+      if (currentChat && currentChat.type === 'private' && currentChat.id === data.username) {
+        typingIndicator.style.display = 'none';
+      }
+    });
+
+    /* --------------- Init load --------------- */
+    // try to load lists immediately (will work after register too)
+    loadUsers();
+    loadGroups();
+
+    /* --------------- Extra: create sample group (dev only) --------------- */
+    // If you want to create a quick group from UI for testing, you can use browser console:
+    // fetch('/api/groups', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({name:'Test Group', admin: '<your-name>', members:['<your-name>']})})
+    // Then call refreshBtn to reload groups.
+  </script>
+</body>
+</html>
